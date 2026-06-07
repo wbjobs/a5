@@ -4,16 +4,20 @@ import { useBattleStore } from '@/store/battleStore'
 import StatusPanel from '@/components/battle/StatusPanel'
 import BehaviorTreeView from '@/components/battle/BehaviorTreeView'
 import BattleLog from '@/components/battle/BattleLog'
-import { Play, Pause, Square, RefreshCw, Trophy, Skull, Minus, X } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
-import type { NodeStatus, BattleEvent, FighterSide } from '@/types'
+import { Play, Pause, Square, RefreshCw, Trophy, Skull, Minus, X, Wifi, WifiOff, AlertTriangle } from 'lucide-react'
+import { useNavigate, useParams } from 'react-router-dom'
+import type { NodeStatus, BattleEvent, FighterSide, BattleState as BattleStateType } from '@/types'
+import { createBattleWS, type ReconnectingWebSocket, type WebSocketHandlers } from '@/utils/api'
 
 export default function Battle() {
   const navigate = useNavigate()
-  const wsRef = useRef<WebSocket | null>(null)
+  const { id } = useParams<{ id: string }>()
+  const wsRef = useRef<ReconnectingWebSocket | null>(null)
   const [nodeStatuses, setNodeStatuses] = useState<Record<string, NodeStatus>>({})
   const [executionPath, setExecutionPath] = useState<string[]>([])
   const [showResult, setShowResult] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [reconnectAttempt, setReconnectAttempt] = useState(0)
   
   const {
     battleState,
@@ -32,18 +36,25 @@ export default function Battle() {
     setTrees
   } = useBattleStore()
   
-  const handleWebSocketMessage = useCallback((event: MessageEvent) => {
+  const handleMessage = useCallback((data: BattleStateType | BattleEvent) => {
     try {
-      const data = JSON.parse(event.data)
-      
-      if (data.type === 'state_update') {
-        updateState(data.payload)
+      if ('frame' in data) {
+        const state = data as BattleStateType
+        updateState(state)
         
-        if (data.payload.isFinished) {
+        if (state.isFinished) {
           setShowResult(true)
         }
-      } else if (data.type === 'battle_event') {
-        const battleEvent = data.payload as BattleEvent
+        
+        if (state.ai1NodeStatus) {
+          setNodeStatuses(prev => ({ ...prev, ...state.ai1NodeStatus, ...state.ai2NodeStatus }))
+        }
+        
+        if (state.ai1Path) {
+          setExecutionPath([...state.ai1Path, ...state.ai2Path])
+        }
+      } else if ('type' in data) {
+        const battleEvent = data as BattleEvent
         addLog(battleEvent)
         
         if (battleEvent.type === 'node_result' && battleEvent.nodeId) {
@@ -56,45 +67,45 @@ export default function Battle() {
             setExecutionPath(prev => [...prev, battleEvent.nodeId!])
           }
         }
-      } else if (data.type === 'trees') {
-        setTrees(data.payload.ai1Tree, data.payload.ai2Tree)
       }
     } catch (error) {
       console.error('Failed to parse WebSocket message:', error)
     }
-  }, [updateState, addLog, setTrees])
+  }, [updateState, addLog])
   
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/battle`
+    if (!id) return
     
-    try {
-      wsRef.current = new WebSocket(wsUrl)
-      
-      wsRef.current.onopen = () => {
+    const handlers: WebSocketHandlers = {
+      onMessage: handleMessage,
+      onOpen: () => {
         connect()
-      }
-      
-      wsRef.current.onmessage = handleWebSocketMessage
-      
-      wsRef.current.onclose = () => {
-        disconnect()
-      }
-      
-      wsRef.current.onerror = (error) => {
+        setReconnecting(false)
+        setReconnectAttempt(0)
+      },
+      onClose: (willReconnect) => {
+        if (!willReconnect) {
+          disconnect()
+        }
+      },
+      onReconnect: (attempt) => {
+        setReconnecting(true)
+        setReconnectAttempt(attempt)
+      },
+      onError: (error) => {
         console.error('WebSocket error:', error)
-        disconnect()
       }
-    } catch (error) {
-      console.error('Failed to connect WebSocket:', error)
     }
+    
+    wsRef.current = createBattleWS(id, handlers)
     
     return () => {
       if (wsRef.current) {
         wsRef.current.close()
+        wsRef.current = null
       }
     }
-  }, [connect, disconnect, handleWebSocketMessage])
+  }, [id, connect, disconnect, handleMessage])
   
   const handleStartBattle = async () => {
     if (!ai1Tree || !ai2Tree) {
@@ -158,13 +169,25 @@ export default function Battle() {
           </h1>
           
           <div className="flex items-center gap-2">
-            <div className={cn(
-              'w-2 h-2 rounded-full',
-              isConnected ? 'bg-[var(--cyber-neon-green)] animate-pulse' : 'bg-[var(--cyber-neon-red)]'
-            )} />
-            <span className="font-mono text-xs text-[var(--cyber-text-secondary)]">
-              {isConnected ? 'CONNECTED' : 'DISCONNECTED'}
-            </span>
+            {reconnecting ? (
+              <>
+                <AlertTriangle size={12} className="text-[var(--cyber-neon-yellow)] animate-pulse" />
+                <span className="font-mono text-xs text-[var(--cyber-neon-yellow)]">
+                  RECONNECTING... ({reconnectAttempt}/20)
+                </span>
+              </>
+            ) : (
+              <>
+                {isConnected ? (
+                  <Wifi size={12} className="text-[var(--cyber-neon-green)]" />
+                ) : (
+                  <WifiOff size={12} className="text-[var(--cyber-neon-red)]" />
+                )}
+                <span className="font-mono text-xs text-[var(--cyber-text-secondary)]">
+                  {isConnected ? 'CONNECTED' : 'DISCONNECTED'}
+                </span>
+              </>
+            )}
           </div>
           
           {battleState && (

@@ -100,6 +100,7 @@ export interface BattleEvent {
 
 export interface BattleState {
   battleId: string
+  frame: number
   round: number
   isRunning: boolean
   isPaused: boolean
@@ -109,6 +110,10 @@ export interface BattleState {
   ai2: FighterState
   ai1CurrentNodeId?: string
   ai2CurrentNodeId?: string
+  ai1Path: string[]
+  ai2Path: string[]
+  ai1NodeStatus: Record<string, NodeStatus>
+  ai2NodeStatus: Record<string, NodeStatus>
   events: BattleEvent[]
 }
 

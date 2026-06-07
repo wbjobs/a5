@@ -32,8 +32,17 @@ type BattleInstance struct {
 	ai2Tree        *types.BehaviorTree
 	usedSkills     []string
 	damages        []int
+	pingTicker     *time.Ticker
+	stopPingCh     chan struct{}
 	mu             sync.RWMutex
 }
+
+const (
+	pingInterval     = 30 * time.Second
+	pongWait         = 60 * time.Second
+	writeWait        = 10 * time.Second
+	maxReconnectWait = 5 * time.Minute
+)
 
 type BattleService struct {
 	btRepo     *repository.BehaviorTreeRepository
@@ -91,6 +100,8 @@ func (s *BattleService) StartBattle(req *types.BattleRequest) (*types.BattleResp
 		ai2Tree:       &req.AI2Tree,
 		usedSkills:    []string{},
 		damages:       []int{},
+		pingTicker:    time.NewTicker(pingInterval),
+		stopPingCh:    make(chan struct{}),
 	}
 
 	s.mu.Lock()
@@ -125,6 +136,8 @@ func (s *BattleService) runBattleLoop(instance *BattleInstance) {
 	ticker := time.NewTicker(instance.frameInterval)
 	defer ticker.Stop()
 
+	go s.startPingLoop(instance)
+
 	for {
 		instance.mu.RLock()
 		if !instance.isRunning {
@@ -145,6 +158,34 @@ func (s *BattleService) runBattleLoop(instance *BattleInstance) {
 				s.endBattle(instance, *winner)
 				return
 			}
+		}
+	}
+}
+
+func (s *BattleService) startPingLoop(instance *BattleInstance) {
+	defer instance.pingTicker.Stop()
+
+	for {
+		select {
+		case <-instance.pingTicker.C:
+			instance.mu.RLock()
+			clients := make([]*websocket.Conn, 0, len(instance.wsClients))
+			for conn := range instance.wsClients {
+				clients = append(clients, conn)
+			}
+			instance.mu.RUnlock()
+
+			for _, conn := range clients {
+				conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					instance.mu.Lock()
+					delete(instance.wsClients, conn)
+					instance.mu.Unlock()
+					_ = conn.Close()
+				}
+			}
+		case <-instance.stopPingCh:
+			return
 		}
 	}
 }
@@ -283,6 +324,8 @@ func (s *BattleService) endBattle(instance *BattleInstance, winner types.Fighter
 	instance.isRunning = false
 	instance.mu.Unlock()
 
+	close(instance.stopPingCh)
+
 	duration := time.Since(instance.startTime).Milliseconds()
 
 	battle, err := s.battleRepo.GetBattleByID(instance.battleID)
@@ -332,9 +375,17 @@ func (s *BattleService) Subscribe(battleID string, conn *websocket.Conn) error {
 		return errors.New("battle not found")
 	}
 
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	instance.mu.Lock()
 	instance.wsClients[conn] = true
 	instance.mu.Unlock()
+
+	go s.readPump(instance, conn)
 
 	state := &types.BattleState{
 		BattleID:   instance.battleID,
@@ -353,6 +404,27 @@ func (s *BattleService) Subscribe(battleID string, conn *websocket.Conn) error {
 	}
 
 	return nil
+}
+
+func (s *BattleService) readPump(instance *BattleInstance, conn *websocket.Conn) {
+	defer func() {
+		instance.mu.Lock()
+		delete(instance.wsClients, conn)
+		instance.mu.Unlock()
+		_ = conn.Close()
+	}()
+
+	conn.SetReadLimit(512)
+
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				fmt.Printf("websocket read error: %v\n", err)
+			}
+			break
+		}
+	}
 }
 
 func (s *BattleService) Unsubscribe(battleID string, conn *websocket.Conn) {

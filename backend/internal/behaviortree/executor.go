@@ -2,25 +2,42 @@ package behaviortree
 
 import (
 	"fmt"
+	"hash/fnv"
 
 	"bt-battle/internal/types"
 )
 
 type BehaviorTreeExecutor struct {
-	tree          *types.BehaviorTree
-	nodeStatus    map[string]types.NodeStatus
-	executionPath []string
-	fighter       *types.FighterState
-	enemy         *types.FighterState
+	tree           *types.BehaviorTree
+	nodeStatus     map[string]types.NodeStatus
+	executionPath  []string
+	fighter        *types.FighterState
+	enemy          *types.FighterState
+	frameCache     map[string]types.NodeStatus
+	childrenCache  map[string][]types.BTNode
+	conditionCache map[string]bool
 }
 
 func NewExecutor(tree *types.BehaviorTree, fighter *types.FighterState, enemy *types.FighterState) *BehaviorTreeExecutor {
-	return &BehaviorTreeExecutor{
-		tree:          tree,
-		nodeStatus:    make(map[string]types.NodeStatus),
-		executionPath: []string{},
-		fighter:       fighter,
-		enemy:         enemy,
+	exec := &BehaviorTreeExecutor{
+		tree:           tree,
+		nodeStatus:     make(map[string]types.NodeStatus),
+		executionPath:  []string{},
+		fighter:        fighter,
+		enemy:          enemy,
+		frameCache:     make(map[string]types.NodeStatus),
+		childrenCache:  make(map[string][]types.BTNode),
+		conditionCache: make(map[string]bool),
+	}
+	exec.buildChildrenCache()
+	return exec
+}
+
+func (e *BehaviorTreeExecutor) buildChildrenCache() {
+	for _, edge := range e.tree.Edges {
+		if child, exists := e.tree.Nodes[edge.Target]; exists {
+			e.childrenCache[edge.Source] = append(e.childrenCache[edge.Source], child)
+		}
 	}
 }
 
@@ -39,9 +56,32 @@ func (e *BehaviorTreeExecutor) Tick() types.NodeStatus {
 func (e *BehaviorTreeExecutor) reset() {
 	e.nodeStatus = make(map[string]types.NodeStatus)
 	e.executionPath = []string{}
+	e.frameCache = make(map[string]types.NodeStatus)
+	e.conditionCache = make(map[string]bool)
+}
+
+func (e *BehaviorTreeExecutor) hashCondition(cond *types.Condition) string {
+	h := fnv.New32a()
+	if cond == nil {
+		return ""
+	}
+	h.Write([]byte(string(cond.Type)))
+	if cond.Value != nil {
+		fmt.Fprintf(h, ":%d", *cond.Value)
+	}
+	if cond.SkillID != nil {
+		h.Write([]byte(":" + *cond.SkillID))
+	}
+	return fmt.Sprintf("%s:%s", cond.Type, h.Sum32())
 }
 
 func (e *BehaviorTreeExecutor) executeNode(node types.BTNode) types.NodeStatus {
+	if cached, exists := e.frameCache[node.ID]; exists {
+		e.executionPath = append(e.executionPath, node.ID)
+		e.nodeStatus[node.ID] = cached
+		return cached
+	}
+
 	e.executionPath = append(e.executionPath, node.ID)
 
 	var status types.NodeStatus
@@ -59,11 +99,15 @@ func (e *BehaviorTreeExecutor) executeNode(node types.BTNode) types.NodeStatus {
 		status = types.NodeStatusFailure
 	}
 
+	e.frameCache[node.ID] = status
 	e.nodeStatus[node.ID] = status
 	return status
 }
 
 func (e *BehaviorTreeExecutor) getChildren(node types.BTNode) []types.BTNode {
+	if children, exists := e.childrenCache[node.ID]; exists {
+		return children
+	}
 	var children []types.BTNode
 	for _, edge := range e.tree.Edges {
 		if edge.Source == node.ID {
@@ -72,6 +116,7 @@ func (e *BehaviorTreeExecutor) getChildren(node types.BTNode) []types.BTNode {
 			}
 		}
 	}
+	e.childrenCache[node.ID] = children
 	return children
 }
 
@@ -109,6 +154,15 @@ func (e *BehaviorTreeExecutor) executeCondition(node types.BTNode) types.NodeSta
 	}
 
 	cond := node.Data.Condition
+	cacheKey := e.hashCondition(cond)
+
+	if cachedResult, exists := e.conditionCache[cacheKey]; exists {
+		if cachedResult {
+			return types.NodeStatusSuccess
+		}
+		return types.NodeStatusFailure
+	}
+
 	var result bool
 
 	switch cond.Type {
@@ -150,6 +204,8 @@ func (e *BehaviorTreeExecutor) executeCondition(node types.BTNode) types.NodeSta
 	default:
 		return types.NodeStatusFailure
 	}
+
+	e.conditionCache[cacheKey] = result
 
 	if result {
 		return types.NodeStatusSuccess
