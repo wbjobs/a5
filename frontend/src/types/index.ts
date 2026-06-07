@@ -73,6 +73,22 @@ export interface Buff {
   value: number
 }
 
+export interface ExecutionStackFrame {
+  nodeId: string
+  nodeType: BTNodeType
+  status: NodeStatus
+  timestamp: number
+  depth: number
+}
+
+export interface AimPrediction {
+  skillId: string
+  predictedX: number
+  predictedY: number
+  confidence: number
+  leadTime: number
+}
+
 export interface FighterState {
   id: FighterSide
   name: string
@@ -85,6 +101,10 @@ export interface FighterState {
   skills: SkillState[]
   buffs: Buff[]
   isDefending: boolean
+  x: number
+  y: number
+  vx: number
+  vy: number
 }
 
 export interface BattleEvent {
@@ -96,6 +116,7 @@ export interface BattleEvent {
   data?: Record<string, unknown>
   nodeId?: string
   nodeStatus?: NodeStatus
+  prediction?: AimPrediction
 }
 
 export interface BattleState {
@@ -115,6 +136,9 @@ export interface BattleState {
   ai1NodeStatus: Record<string, NodeStatus>
   ai2NodeStatus: Record<string, NodeStatus>
   events: BattleEvent[]
+  executionStack: string[]
+  stepMode: boolean
+  currentStep: number
 }
 
 export interface BattleRequest {

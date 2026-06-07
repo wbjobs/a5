@@ -4,10 +4,12 @@ import { useBattleStore } from '@/store/battleStore'
 import StatusPanel from '@/components/battle/StatusPanel'
 import BehaviorTreeView from '@/components/battle/BehaviorTreeView'
 import BattleLog from '@/components/battle/BattleLog'
+import DebuggerPanel from '@/components/battle/DebuggerPanel'
+import AimPredictionView from '@/components/battle/AimPredictionView'
 import { Play, Pause, Square, RefreshCw, Trophy, Skull, Minus, X, Wifi, WifiOff, AlertTriangle } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import type { NodeStatus, BattleEvent, FighterSide, BattleState as BattleStateType } from '@/types'
-import { createBattleWS, type ReconnectingWebSocket, type WebSocketHandlers } from '@/utils/api'
+import type { NodeStatus, BattleEvent, FighterSide, BattleState as BattleStateType, ExecutionStackFrame, AimPrediction } from '@/types'
+import { createBattleWS, type ReconnectingWebSocket, type WebSocketHandlers, type WebSocketMessage } from '@/utils/api'
 
 export default function Battle() {
   const navigate = useNavigate()
@@ -18,6 +20,8 @@ export default function Battle() {
   const [showResult, setShowResult] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
   const [reconnectAttempt, setReconnectAttempt] = useState(0)
+  const [debuggerOpen, setDebuggerOpen] = useState(false)
+  const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null)
   
   const {
     battleState,
@@ -26,6 +30,10 @@ export default function Battle() {
     logs,
     ai1Tree,
     ai2Tree,
+    stepMode,
+    executionSpeed,
+    executionStack,
+    aimPredictions,
     startBattle,
     stopBattle,
     togglePause,
@@ -33,45 +41,114 @@ export default function Battle() {
     addLog,
     connect,
     disconnect,
-    setTrees
+    setTrees,
+    setStepMode,
+    setSpeed,
+    updateExecutionStack,
+    updateAimPrediction
   } = useBattleStore()
+
+  const sendCommand = useCallback((command: WebSocketMessage) => {
+    if (wsRef.current?.isOpen() && wsRef.current.ws) {
+      try {
+        wsRef.current.ws.send(JSON.stringify(command))
+      } catch (error) {
+        console.error('Failed to send command:', error)
+      }
+    }
+  }, [])
+
+  const handleStep = useCallback(() => {
+    sendCommand({ type: 'step' })
+  }, [sendCommand])
+
+  const handleReset = useCallback(() => {
+    sendCommand({ type: 'reset' })
+  }, [sendCommand])
+
+  const handlePause = useCallback(() => {
+    sendCommand({ type: 'pause' })
+    togglePause()
+  }, [sendCommand, togglePause])
+
+  const handleResume = useCallback(() => {
+    sendCommand({ type: 'resume' })
+    togglePause()
+  }, [sendCommand, togglePause])
+
+  const handleSpeedChange = useCallback((speed: number) => {
+    setSpeed(speed)
+    sendCommand({ type: 'speed', data: { speed } })
+  }, [setSpeed, sendCommand])
+
+  const handleStepModeChange = useCallback((enabled: boolean) => {
+    setStepMode(enabled)
+  }, [setStepMode])
+
+  const handleNodeClick = useCallback((nodeId: string) => {
+    setHighlightedNodeId(nodeId)
+  }, [])
   
-  const handleMessage = useCallback((data: BattleStateType | BattleEvent) => {
+  const handleMessage = useCallback((data: unknown) => {
     try {
-      if ('frame' in data) {
-        const state = data as BattleStateType
-        updateState(state)
-        
-        if (state.isFinished) {
-          setShowResult(true)
-        }
-        
-        if (state.ai1NodeStatus) {
-          setNodeStatuses(prev => ({ ...prev, ...state.ai1NodeStatus, ...state.ai2NodeStatus }))
-        }
-        
-        if (state.ai1Path) {
-          setExecutionPath([...state.ai1Path, ...state.ai2Path])
-        }
-      } else if ('type' in data) {
-        const battleEvent = data as BattleEvent
-        addLog(battleEvent)
-        
-        if (battleEvent.type === 'node_result' && battleEvent.nodeId) {
-          setNodeStatuses(prev => ({
-            ...prev,
-            [battleEvent.nodeId!]: battleEvent.nodeStatus || 'idle'
-          }))
+      const msg = data as WebSocketMessage
+      
+      if (msg.type === 'step_completed') {
+        return
+      }
+      
+      if (msg.type === 'execution_stack') {
+        const stack = msg.data as ExecutionStackFrame[]
+        updateExecutionStack(stack)
+        return
+      }
+      
+      if (msg.type === 'aim_prediction') {
+        const predictionData = msg.data as { side: string; prediction: AimPrediction }
+        updateAimPrediction(predictionData.side, predictionData.prediction)
+        return
+      }
+      
+      if (typeof data === 'object' && data !== null) {
+        if ('frame' in data) {
+          const state = data as BattleStateType
+          updateState(state)
           
-          if (battleEvent.nodeStatus === 'running') {
-            setExecutionPath(prev => [...prev, battleEvent.nodeId!])
+          if (state.isFinished) {
+            setShowResult(true)
+          }
+          
+          if (state.ai1NodeStatus) {
+            setNodeStatuses(prev => ({ ...prev, ...state.ai1NodeStatus, ...state.ai2NodeStatus }))
+          }
+          
+          if (state.ai1Path) {
+            setExecutionPath([...state.ai1Path, ...state.ai2Path])
+          }
+        } else if ('type' in data) {
+          const battleEvent = data as BattleEvent
+          addLog(battleEvent)
+          
+          if (battleEvent.prediction && battleEvent.side) {
+            updateAimPrediction(battleEvent.side, battleEvent.prediction)
+          }
+          
+          if (battleEvent.type === 'node_result' && battleEvent.nodeId) {
+            setNodeStatuses(prev => ({
+              ...prev,
+              [battleEvent.nodeId!]: battleEvent.nodeStatus || 'idle'
+            }))
+            
+            if (battleEvent.nodeStatus === 'running') {
+              setExecutionPath(prev => [...prev, battleEvent.nodeId!])
+            }
           }
         }
       }
     } catch (error) {
       console.error('Failed to parse WebSocket message:', error)
     }
-  }, [updateState, addLog])
+  }, [updateState, addLog, updateExecutionStack, updateAimPrediction])
   
   useEffect(() => {
     if (!id) return
@@ -244,20 +321,54 @@ export default function Battle() {
         </div>
       )}
       
-      <div className="flex-1 flex min-h-0">
-        <div className="flex-1 flex flex-col min-h-0 border-r border-[var(--cyber-border)]">
+      <div className="flex-1 flex min-h-0 relative">
+        <div className="flex-1 flex flex-col min-h-0 border-r border-[var(--cyber-border)] relative">
           <BehaviorTreeView
             ai1Tree={ai1Tree}
             ai2Tree={ai2Tree}
-            ai1CurrentNodeId={battleState?.ai1CurrentNodeId}
-            ai2CurrentNodeId={battleState?.ai2CurrentNodeId}
+            ai1CurrentNodeId={highlightedNodeId || battleState?.ai1CurrentNodeId}
+            ai2CurrentNodeId={highlightedNodeId || battleState?.ai2CurrentNodeId}
             executionPath={executionPath}
             nodeStatuses={nodeStatuses}
           />
+          
+          {battleState && (
+            <>
+              <AimPredictionView
+                fighter={battleState.ai1}
+                prediction={aimPredictions['ai1'] || null}
+                side="left"
+                className="absolute inset-0 pointer-events-none z-10"
+              />
+              <AimPredictionView
+                fighter={battleState.ai2}
+                prediction={aimPredictions['ai2'] || null}
+                side="right"
+                className="absolute inset-0 pointer-events-none z-10"
+              />
+            </>
+          )}
         </div>
         <div className="w-96 flex flex-col min-h-0">
           <BattleLog events={logs} />
         </div>
+
+        <DebuggerPanel
+          isOpen={debuggerOpen}
+          onToggle={() => setDebuggerOpen(!debuggerOpen)}
+          isPaused={isPaused}
+          stepMode={stepMode}
+          executionSpeed={executionSpeed}
+          executionStack={executionStack}
+          battleState={battleState}
+          onPause={handlePause}
+          onResume={handleResume}
+          onStep={handleStep}
+          onReset={handleReset}
+          onSpeedChange={handleSpeedChange}
+          onStepModeChange={handleStepModeChange}
+          onNodeClick={handleNodeClick}
+        />
       </div>
       
       <AnimatePresence>
@@ -344,8 +455,4 @@ export default function Battle() {
       </AnimatePresence>
     </div>
   )
-}
-
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(' ')
 }

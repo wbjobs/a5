@@ -70,8 +70,13 @@ export function getStats(): Promise<BattleStats> {
   return request<BattleStats>('/stats')
 }
 
+export interface WebSocketMessage {
+  type: string
+  data?: unknown
+}
+
 export interface WebSocketHandlers {
-  onMessage: (data: BattleState | BattleEvent) => void
+  onMessage: (data: BattleState | BattleEvent | WebSocketMessage) => void
   onError?: (error: Event) => void
   onClose?: (willReconnect: boolean) => void
   onReconnect?: (attempt: number) => void

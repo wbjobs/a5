@@ -3,31 +3,36 @@ package behaviortree
 import (
 	"fmt"
 	"hash/fnv"
+	"time"
 
 	"bt-battle/internal/types"
 )
 
 type BehaviorTreeExecutor struct {
-	tree           *types.BehaviorTree
-	nodeStatus     map[string]types.NodeStatus
-	executionPath  []string
-	fighter        *types.FighterState
-	enemy          *types.FighterState
-	frameCache     map[string]types.NodeStatus
-	childrenCache  map[string][]types.BTNode
-	conditionCache map[string]bool
+	tree            *types.BehaviorTree
+	nodeStatus      map[string]types.NodeStatus
+	executionPath   []string
+	fighter         *types.FighterState
+	enemy           *types.FighterState
+	frameCache      map[string]types.NodeStatus
+	childrenCache   map[string][]types.BTNode
+	conditionCache  map[string]bool
+	executionStack  []types.ExecutionStackFrame
+	currentDepth    int
 }
 
 func NewExecutor(tree *types.BehaviorTree, fighter *types.FighterState, enemy *types.FighterState) *BehaviorTreeExecutor {
 	exec := &BehaviorTreeExecutor{
-		tree:           tree,
-		nodeStatus:     make(map[string]types.NodeStatus),
-		executionPath:  []string{},
-		fighter:        fighter,
-		enemy:          enemy,
-		frameCache:     make(map[string]types.NodeStatus),
-		childrenCache:  make(map[string][]types.BTNode),
-		conditionCache: make(map[string]bool),
+		tree:            tree,
+		nodeStatus:      make(map[string]types.NodeStatus),
+		executionPath:   []string{},
+		fighter:         fighter,
+		enemy:           enemy,
+		frameCache:      make(map[string]types.NodeStatus),
+		childrenCache:   make(map[string][]types.BTNode),
+		conditionCache:  make(map[string]bool),
+		executionStack:  []types.ExecutionStackFrame{},
+		currentDepth:    0,
 	}
 	exec.buildChildrenCache()
 	return exec
@@ -58,6 +63,33 @@ func (e *BehaviorTreeExecutor) reset() {
 	e.executionPath = []string{}
 	e.frameCache = make(map[string]types.NodeStatus)
 	e.conditionCache = make(map[string]bool)
+	e.executionStack = []types.ExecutionStackFrame{}
+	e.currentDepth = 0
+}
+
+func (e *BehaviorTreeExecutor) PushStack(nodeID string, nodeType types.NodeType) {
+	frame := types.ExecutionStackFrame{
+		NodeID:    nodeID,
+		NodeType:  nodeType,
+		Status:    types.NodeStatusRunning,
+		Timestamp: time.Now().UnixMilli(),
+		Depth:     e.currentDepth,
+	}
+	e.executionStack = append(e.executionStack, frame)
+	e.currentDepth++
+}
+
+func (e *BehaviorTreeExecutor) PopStack(status types.NodeStatus) {
+	if len(e.executionStack) == 0 {
+		return
+	}
+	e.currentDepth--
+	lastIdx := len(e.executionStack) - 1
+	e.executionStack[lastIdx].Status = status
+}
+
+func (e *BehaviorTreeExecutor) GetExecutionStack() []types.ExecutionStackFrame {
+	return e.executionStack
 }
 
 func (e *BehaviorTreeExecutor) hashCondition(cond *types.Condition) string {
@@ -82,6 +114,7 @@ func (e *BehaviorTreeExecutor) executeNode(node types.BTNode) types.NodeStatus {
 		return cached
 	}
 
+	e.PushStack(node.ID, node.Data.NodeType)
 	e.executionPath = append(e.executionPath, node.ID)
 
 	var status types.NodeStatus
@@ -99,6 +132,7 @@ func (e *BehaviorTreeExecutor) executeNode(node types.BTNode) types.NodeStatus {
 		status = types.NodeStatusFailure
 	}
 
+	e.PopStack(status)
 	e.frameCache[node.ID] = status
 	e.nodeStatus[node.ID] = status
 	return status
@@ -201,6 +235,16 @@ func (e *BehaviorTreeExecutor) executeCondition(node types.BTNode) types.NodeSta
 			return types.NodeStatusFailure
 		}
 		result = CheckCooldownReady(e.fighter, *cond.SkillID)
+	case types.ConditionTypeDistanceBelow:
+		if cond.Value == nil {
+			return types.NodeStatusFailure
+		}
+		result = CheckDistanceBelow(e.fighter, e.enemy, *cond.Value)
+	case types.ConditionTypeDistanceAbove:
+		if cond.Value == nil {
+			return types.NodeStatusFailure
+		}
+		result = CheckDistanceAbove(e.fighter, e.enemy, *cond.Value)
 	default:
 		return types.NodeStatusFailure
 	}

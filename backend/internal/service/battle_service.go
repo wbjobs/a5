@@ -27,6 +27,10 @@ type BattleInstance struct {
 	maxFrames      int
 	isRunning      bool
 	isPaused       bool
+	stepMode       bool
+	currentStep    int
+	executionSpeed float64
+	stepSignal     chan struct{}
 	startTime      time.Time
 	ai1Tree        *types.BehaviorTree
 	ai2Tree        *types.BehaviorTree
@@ -86,22 +90,26 @@ func (s *BattleService) StartBattle(req *types.BattleRequest) (*types.BattleResp
 	}
 
 	instance := &BattleInstance{
-		battleID:      battleID,
-		combat:        combatSystem,
-		executor1:     executor1,
-		executor2:     executor2,
-		wsClients:     make(map[*websocket.Conn]bool),
-		frameInterval: frameInterval,
-		maxFrames:     maxFrames,
-		isRunning:     true,
-		isPaused:      false,
-		startTime:     time.Now(),
-		ai1Tree:       &req.AI1Tree,
-		ai2Tree:       &req.AI2Tree,
-		usedSkills:    []string{},
-		damages:       []int{},
-		pingTicker:    time.NewTicker(pingInterval),
-		stopPingCh:    make(chan struct{}),
+		battleID:       battleID,
+		combat:         combatSystem,
+		executor1:      executor1,
+		executor2:      executor2,
+		wsClients:      make(map[*websocket.Conn]bool),
+		frameInterval:  frameInterval,
+		maxFrames:      maxFrames,
+		isRunning:      true,
+		isPaused:       false,
+		stepMode:       false,
+		currentStep:    0,
+		executionSpeed: 1.0,
+		stepSignal:     make(chan struct{}, 1),
+		startTime:      time.Now(),
+		ai1Tree:        &req.AI1Tree,
+		ai2Tree:        &req.AI2Tree,
+		usedSkills:     []string{},
+		damages:        []int{},
+		pingTicker:     time.NewTicker(pingInterval),
+		stopPingCh:     make(chan struct{}),
 	}
 
 	s.mu.Lock()
@@ -149,14 +157,33 @@ func (s *BattleService) runBattleLoop(instance *BattleInstance) {
 			time.Sleep(instance.frameInterval)
 			continue
 		}
+		stepMode := instance.stepMode
 		instance.mu.RUnlock()
 
-		select {
-		case <-ticker.C:
+		if stepMode {
+			<-instance.stepSignal
+			instance.mu.Lock()
+			instance.currentStep++
+			instance.mu.Unlock()
 			winner := s.battleTick(instance)
 			if winner != nil {
 				s.endBattle(instance, *winner)
 				return
+			}
+		} else {
+			select {
+			case <-ticker.C:
+				instance.mu.Lock()
+				speed := instance.executionSpeed
+				instance.mu.Unlock()
+				if speed != 1.0 {
+					ticker.Reset(time.Duration(float64(instance.frameInterval) / speed))
+				}
+				winner := s.battleTick(instance)
+				if winner != nil {
+					s.endBattle(instance, *winner)
+					return
+				}
 			}
 		}
 	}
@@ -206,8 +233,21 @@ func (s *BattleService) battleTick(instance *BattleInstance) *types.FighterSide 
 	_ = instance.executor1.Tick()
 	_ = instance.executor2.Tick()
 
+	aimPredictions := make(map[string]types.AimPrediction)
+
 	action1, err1 := instance.executor1.GetLastAction()
 	if err1 == nil && action1 != nil {
+		if (action1.Type == types.ActionTypeSkill && action1.SkillID != nil) || action1.Type == types.ActionTypeAttack {
+			var skillId string
+			if action1.Type == types.ActionTypeAttack {
+				skillId = "attack"
+			} else {
+				skillId = *action1.SkillID
+			}
+			if pred, err := instance.combat.GetAimPrediction(types.FighterSideAI1, skillId); err == nil {
+				aimPredictions["ai1"] = *pred
+			}
+		}
 		instance.combat.ExecuteAction(types.FighterSideAI1, *action1)
 		if action1.Type == types.ActionTypeSkill && action1.SkillID != nil {
 			instance.usedSkills = append(instance.usedSkills, *action1.SkillID)
@@ -216,6 +256,17 @@ func (s *BattleService) battleTick(instance *BattleInstance) *types.FighterSide 
 
 	action2, err2 := instance.executor2.GetLastAction()
 	if err2 == nil && action2 != nil {
+		if (action2.Type == types.ActionTypeSkill && action2.SkillID != nil) || action2.Type == types.ActionTypeAttack {
+			var skillId string
+			if action2.Type == types.ActionTypeAttack {
+				skillId = "attack"
+			} else {
+				skillId = *action2.SkillID
+			}
+			if pred, err := instance.combat.GetAimPrediction(types.FighterSideAI2, skillId); err == nil {
+				aimPredictions["ai2"] = *pred
+			}
+		}
 		instance.combat.ExecuteAction(types.FighterSideAI2, *action2)
 		if action2.Type == types.ActionTypeSkill && action2.SkillID != nil {
 			instance.usedSkills = append(instance.usedSkills, *action2.SkillID)
@@ -224,9 +275,19 @@ func (s *BattleService) battleTick(instance *BattleInstance) *types.FighterSide 
 
 	instance.combat.Tick()
 
-	for _, event := range instance.combat.GetEvents() {
-		if event.Type == types.EventTypeDamage && event.Data != nil {
-			if damage, ok := event.Data["damage"].(int); ok {
+	events := instance.combat.GetEvents()
+	for i := range events {
+		if events[i].Type == types.EventTypeSkill || events[i].Type == types.EventTypeAttack {
+			if events[i].Side != nil {
+				sideKey := string(*events[i].Side)
+				if pred, ok := aimPredictions[sideKey]; ok {
+					predCopy := pred
+					events[i].Prediction = &predCopy
+				}
+			}
+		}
+		if events[i].Type == types.EventTypeDamage && events[i].Data != nil {
+			if damage, ok := events[i].Data["damage"].(int); ok {
 				instance.damages = append(instance.damages, damage)
 			}
 		}
@@ -238,17 +299,23 @@ func (s *BattleService) battleTick(instance *BattleInstance) *types.FighterSide 
 	ai1CurrentNodeID := s.getCurrentNodeID(instance.executor1)
 	ai2CurrentNodeID := s.getCurrentNodeID(instance.executor2)
 
+	executionStack := instance.executor1.GetExecutionStack()
+
 	state := &types.BattleState{
-		BattleID:        instance.battleID,
-		Frame:           instance.combat.GetFrame(),
-		IsRunning:       instance.isRunning,
-		IsPaused:        instance.isPaused,
-		IsFinished:      false,
-		AI1:             *instance.combat.GetAI1(),
-		AI2:             *instance.combat.GetAI2(),
+		BattleID:         instance.battleID,
+		Frame:            instance.combat.GetFrame(),
+		IsRunning:        instance.isRunning,
+		IsPaused:         instance.isPaused,
+		IsFinished:       false,
+		AI1:              *instance.combat.GetAI1(),
+		AI2:              *instance.combat.GetAI2(),
 		AI1CurrentNodeID: ai1CurrentNodeID,
 		AI2CurrentNodeID: ai2CurrentNodeID,
-		Events:          instance.combat.GetEvents(),
+		Events:           events,
+		ExecutionStack:   executionStack,
+		StepMode:         instance.stepMode,
+		CurrentStep:      instance.currentStep,
+		AimPredictions:   aimPredictions,
 	}
 
 	instance.combat.ClearEvents()
@@ -337,15 +404,19 @@ func (s *BattleService) endBattle(instance *BattleInstance, winner types.Fighter
 	}
 
 	state := &types.BattleState{
-		BattleID:   instance.battleID,
-		Frame:      instance.combat.GetFrame(),
-		IsRunning:  false,
-		IsPaused:   false,
-		IsFinished: true,
-		Winner:     &winner,
-		AI1:        *instance.combat.GetAI1(),
-		AI2:        *instance.combat.GetAI2(),
-		Events:     []types.BattleEvent{},
+		BattleID:         instance.battleID,
+		Frame:            instance.combat.GetFrame(),
+		IsRunning:        false,
+		IsPaused:         false,
+		IsFinished:       true,
+		Winner:           &winner,
+		AI1:              *instance.combat.GetAI1(),
+		AI2:              *instance.combat.GetAI2(),
+		Events:           []types.BattleEvent{},
+		ExecutionStack:   []types.ExecutionStackFrame{},
+		StepMode:         instance.stepMode,
+		CurrentStep:      instance.currentStep,
+		AimPredictions:   make(map[string]types.AimPrediction),
 	}
 
 	s.broadcastState(instance, state)
@@ -388,14 +459,18 @@ func (s *BattleService) Subscribe(battleID string, conn *websocket.Conn) error {
 	go s.readPump(instance, conn)
 
 	state := &types.BattleState{
-		BattleID:   instance.battleID,
-		Frame:      instance.combat.GetFrame(),
-		IsRunning:  instance.isRunning,
-		IsPaused:   instance.isPaused,
-		IsFinished: !instance.isRunning,
-		AI1:        *instance.combat.GetAI1(),
-		AI2:        *instance.combat.GetAI2(),
-		Events:     []types.BattleEvent{},
+		BattleID:         instance.battleID,
+		Frame:            instance.combat.GetFrame(),
+		IsRunning:        instance.isRunning,
+		IsPaused:         instance.isPaused,
+		IsFinished:       !instance.isRunning,
+		AI1:              *instance.combat.GetAI1(),
+		AI2:              *instance.combat.GetAI2(),
+		Events:           []types.BattleEvent{},
+		ExecutionStack:   instance.executor1.GetExecutionStack(),
+		StepMode:         instance.stepMode,
+		CurrentStep:      instance.currentStep,
+		AimPredictions:   make(map[string]types.AimPrediction),
 	}
 
 	data, err := json.Marshal(state)
@@ -406,6 +481,53 @@ func (s *BattleService) Subscribe(battleID string, conn *websocket.Conn) error {
 	return nil
 }
 
+func (s *BattleService) handleCommand(conn *websocket.Conn, cmd types.WSCommand) {
+	var targetInstance *BattleInstance
+
+	s.mu.RLock()
+	for _, inst := range s.battles {
+		inst.mu.RLock()
+		if _, exists := inst.wsClients[conn]; exists {
+			targetInstance = inst
+			inst.mu.RUnlock()
+			break
+		}
+		inst.mu.RUnlock()
+	}
+	s.mu.RUnlock()
+
+	if targetInstance == nil {
+		return
+	}
+
+	targetInstance.mu.Lock()
+	defer targetInstance.mu.Unlock()
+
+	switch cmd.Type {
+	case "pause":
+		targetInstance.isPaused = true
+	case "resume":
+		targetInstance.isPaused = false
+	case "step":
+		if targetInstance.stepMode {
+			select {
+			case targetInstance.stepSignal <- struct{}{}:
+			default:
+			}
+		}
+	case "speed":
+		if speedVal, ok := cmd.Data["speed"].(float64); ok {
+			if speedVal > 0 {
+				targetInstance.executionSpeed = speedVal
+			}
+		}
+	case "stepMode":
+		if enabled, ok := cmd.Data["enabled"].(bool); ok {
+			targetInstance.stepMode = enabled
+		}
+	}
+}
+
 func (s *BattleService) readPump(instance *BattleInstance, conn *websocket.Conn) {
 	defer func() {
 		instance.mu.Lock()
@@ -414,15 +536,20 @@ func (s *BattleService) readPump(instance *BattleInstance, conn *websocket.Conn)
 		_ = conn.Close()
 	}()
 
-	conn.SetReadLimit(512)
+	conn.SetReadLimit(1024)
 
 	for {
-		_, _, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				fmt.Printf("websocket read error: %v\n", err)
 			}
 			break
+		}
+
+		var cmd types.WSCommand
+		if err := json.Unmarshal(msg, &cmd); err == nil {
+			s.handleCommand(conn, cmd)
 		}
 	}
 }
@@ -508,5 +635,9 @@ func (s *BattleService) GetBattleState(battleID string) (*types.BattleState, err
 		AI1CurrentNodeID: ai1CurrentNodeID,
 		AI2CurrentNodeID: ai2CurrentNodeID,
 		Events:           instance.combat.GetEvents(),
+		ExecutionStack:   instance.executor1.GetExecutionStack(),
+		StepMode:         instance.stepMode,
+		CurrentStep:      instance.currentStep,
+		AimPredictions:   make(map[string]types.AimPrediction),
 	}, nil
 }

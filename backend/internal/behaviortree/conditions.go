@@ -1,6 +1,8 @@
 package behaviortree
 
 import (
+	"math"
+
 	"bt-battle/internal/types"
 )
 
@@ -45,4 +47,18 @@ func CheckCooldownReady(fighter *types.FighterState, skillId string) bool {
 		}
 	}
 	return false
+}
+
+func CheckDistanceBelow(fighter, enemy *types.FighterState, value float64) bool {
+	dx := fighter.X - enemy.X
+	dy := fighter.Y - enemy.Y
+	distance := math.Sqrt(dx*dx + dy*dy)
+	return distance < value
+}
+
+func CheckDistanceAbove(fighter, enemy *types.FighterState, value float64) bool {
+	dx := fighter.X - enemy.X
+	dy := fighter.Y - enemy.Y
+	distance := math.Sqrt(dx*dx + dy*dy)
+	return distance > value
 }

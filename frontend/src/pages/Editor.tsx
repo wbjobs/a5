@@ -22,6 +22,7 @@ import { BattleConfigModal } from '../components/editor/BattleConfigModal'
 import { useEditorStore } from '../store/editorStore'
 import { generateId } from '../utils/btUtils'
 import { BTNodeType, BTNode, BTNodeData } from '../types'
+import { useClipboard } from '../hooks/useClipboard'
 import {
   SelectorNode,
   SequenceNode,
@@ -42,6 +43,8 @@ const EditorContent: React.FC = () => {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const [reactFlowInstance, setReactFlowInstance] = useState<{ screenToFlowPosition: (pos: { x: number; y: number }) => { x: number; y: number } } | null>(null)
   const [showBattleModal, setShowBattleModal] = useState(false)
+  const [isAltDrag, setIsAltDrag] = useState(false)
+  const [dragStartNode, setDragStartNode] = useState<Node | null>(null)
 
   const {
     nodes: storeNodes,
@@ -52,7 +55,15 @@ const EditorContent: React.FC = () => {
     addEdge: addStoreEdge,
     setSelectedNode,
     setRootNode,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    historyIndex,
+    history,
   } = useEditorStore()
+
+  const { copyNode, pasteNode, hasCopiedNode } = useClipboard()
 
   const initialNodes = useMemo(() => {
     const nodes: Node[] = []
@@ -95,6 +106,79 @@ const EditorContent: React.FC = () => {
   useEffect(() => {
     setEdges(initialEdges)
   }, [initialEdges, setEdges])
+
+  const handleCopy = useCallback(() => {
+    if (selectedNodeId) {
+      const node = storeNodes.get(selectedNodeId)
+      if (node) {
+        copyNode(node)
+      }
+    }
+  }, [selectedNodeId, storeNodes, copyNode])
+
+  const handlePaste = useCallback(() => {
+    if (reactFlowInstance && reactFlowWrapper.current) {
+      const bounds = reactFlowWrapper.current.getBoundingClientRect()
+      const centerX = bounds.width / 2
+      const centerY = bounds.height / 2
+      const position = reactFlowInstance.screenToFlowPosition({
+        x: centerX,
+        y: centerY,
+      })
+      const newNode = pasteNode(position)
+      if (newNode) {
+        addNode(newNode)
+      }
+    }
+  }, [reactFlowInstance, pasteNode, addNode])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+
+      if (isInput) return
+
+      if (event.ctrlKey || event.metaKey) {
+        switch (event.key.toLowerCase()) {
+          case 'z':
+            event.preventDefault()
+            undo()
+            break
+          case 'y':
+            event.preventDefault()
+            redo()
+            break
+          case 'c':
+            event.preventDefault()
+            handleCopy()
+            break
+          case 'v':
+            event.preventDefault()
+            handlePaste()
+            break
+        }
+      }
+
+      if (event.key === 'Alt') {
+        setIsAltDrag(true)
+      }
+    }
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Alt') {
+        setIsAltDrag(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+    }
+  }, [undo, redo, handleCopy, handlePaste])
 
   const onConnect = useCallback(
     (params: Connection) => {
@@ -207,11 +291,41 @@ const EditorContent: React.FC = () => {
     }
   }
 
+  const onNodeDragStart = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      setDragStartNode(node)
+    },
+    []
+  )
+
   const onNodeDragStop = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      updateNodePosition(node.id, node.position)
+      if (isAltDrag && dragStartNode && dragStartNode.id === node.id) {
+        const storeNode = storeNodes.get(node.id)
+        if (storeNode) {
+          const newNode: BTNode = {
+            ...storeNode,
+            id: generateId(),
+            position: {
+              x: node.position.x + 30,
+              y: node.position.y + 30,
+            },
+            data: {
+              ...storeNode.data,
+              condition: storeNode.data.condition ? { ...storeNode.data.condition } : undefined,
+              action: storeNode.data.action ? { ...storeNode.data.action } : undefined,
+            },
+          }
+          addNode(newNode)
+          updateNodePosition(dragStartNode.id, dragStartNode.position)
+        }
+      } else {
+        updateNodePosition(node.id, node.position)
+      }
+      setDragStartNode(null)
+      setIsAltDrag(false)
     },
-    [updateNodePosition]
+    [isAltDrag, dragStartNode, storeNodes, addNode, updateNodePosition]
   )
 
   const onNodeClick = useCallback(
@@ -238,7 +352,18 @@ const EditorContent: React.FC = () => {
         }}
       />
 
-      <Toolbar onStartBattle={() => setShowBattleModal(true)} />
+      <Toolbar
+        onStartBattle={() => setShowBattleModal(true)}
+        onUndo={undo}
+        onRedo={redo}
+        onCopy={handleCopy}
+        onPaste={handlePaste}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        hasCopiedNode={hasCopiedNode}
+        historyIndex={historyIndex}
+        historyCount={history.length}
+      />
 
       <div className="flex-1 flex overflow-hidden relative">
         <NodePalette />
@@ -253,6 +378,7 @@ const EditorContent: React.FC = () => {
             onInit={setReactFlowInstance}
             onDrop={onDrop}
             onDragOver={onDragOver}
+            onNodeDragStart={onNodeDragStart}
             onNodeDragStop={onNodeDragStop}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
@@ -304,6 +430,18 @@ const EditorContent: React.FC = () => {
               ═══ BEHAVIOR TREE EDITOR ═══
             </span>
           </motion.div>
+
+          {isAltDrag && (
+            <motion.div
+              className="absolute top-16 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-blue-900/80 border border-blue-500/50 rounded-lg backdrop-blur-sm z-50"
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <span className="text-blue-300 text-xs font-mono">
+                Alt拖拽模式：释放鼠标将复制节点
+              </span>
+            </motion.div>
+          )}
         </div>
 
         <PropertyPanel />

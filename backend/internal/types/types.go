@@ -21,6 +21,8 @@ const (
 	ConditionTypeSkillReady   ConditionType = "skill_ready"
 	ConditionTypeEnergyAbove  ConditionType = "energy_above"
 	ConditionTypeCooldownReady  ConditionType = "cooldown_ready"
+	ConditionTypeDistanceBelow ConditionType = "distance_below"
+	ConditionTypeDistanceAbove ConditionType = "distance_above"
 )
 
 type ActionType string
@@ -101,23 +103,25 @@ type BTEdge struct {
 }
 
 type Skill struct {
-	ID          string `json:"id" bson:"id"`
-	Name        string `json:"name" bson:"name"`
-	Cooldown    int    `json:"cooldown" bson:"cooldown"`
-	MaxCooldown int    `json:"maxCooldown" bson:"maxCooldown"`
-	EnergyCost  int    `json:"energyCost" bson:"energyCost"`
-	Damage      int    `json:"damage" bson:"damage"`
-	Heal        int    `json:"heal" bson:"heal"`
+	ID              string  `json:"id" bson:"id"`
+	Name            string  `json:"name" bson:"name"`
+	Cooldown        int     `json:"cooldown" bson:"cooldown"`
+	MaxCooldown     int     `json:"maxCooldown" bson:"maxCooldown"`
+	EnergyCost      int     `json:"energyCost" bson:"energyCost"`
+	Damage          int     `json:"damage" bson:"damage"`
+	Heal            int     `json:"heal" bson:"heal"`
+	ProjectileSpeed float64 `json:"projectileSpeed,omitempty" bson:"projectileSpeed,omitempty"`
 }
 
 type SkillState struct {
-	ID          string `json:"id" bson:"id"`
-	Name        string `json:"name" bson:"name"`
-	Cooldown    int    `json:"cooldown" bson:"cooldown"`
-	MaxCooldown int    `json:"maxCooldown" bson:"maxCooldown"`
-	EnergyCost  int    `json:"energyCost" bson:"energyCost"`
-	Damage      int    `json:"damage" bson:"damage"`
-	Heal        int    `json:"heal" bson:"heal"`
+	ID              string  `json:"id" bson:"id"`
+	Name            string  `json:"name" bson:"name"`
+	Cooldown        int     `json:"cooldown" bson:"cooldown"`
+	MaxCooldown     int     `json:"maxCooldown" bson:"maxCooldown"`
+	EnergyCost      int     `json:"energyCost" bson:"energyCost"`
+	Damage          int     `json:"damage" bson:"damage"`
+	Heal            int     `json:"heal" bson:"heal"`
+	ProjectileSpeed float64 `json:"projectileSpeed,omitempty" bson:"projectileSpeed,omitempty"`
 }
 
 type Buff struct {
@@ -140,6 +144,26 @@ type FighterState struct {
 	Skills      []SkillState `json:"skills" bson:"skills"`
 	Buffs       []Buff      `json:"buffs" bson:"buffs"`
 	IsDefending bool        `json:"isDefending" bson:"isDefending"`
+	X           float64     `json:"x" bson:"x"`
+	Y           float64     `json:"y" bson:"y"`
+	Vx          float64     `json:"vx" bson:"vx"`
+	Vy          float64     `json:"vy" bson:"vy"`
+}
+
+type ExecutionStackFrame struct {
+	NodeID    string     `json:"nodeId" bson:"nodeId"`
+	NodeType  NodeType   `json:"nodeType" bson:"nodeType"`
+	Status    NodeStatus `json:"status" bson:"status"`
+	Timestamp int64      `json:"timestamp" bson:"timestamp"`
+	Depth     int        `json:"depth" bson:"depth"`
+}
+
+type AimPrediction struct {
+	SkillID     string  `json:"skillId" bson:"skillId"`
+	PredictedX  float64 `json:"predictedX" bson:"predictedX"`
+	PredictedY  float64 `json:"predictedY" bson:"predictedY"`
+	Confidence  float64 `json:"confidence" bson:"confidence"`
+	LeadTime    float64 `json:"leadTime" bson:"leadTime"`
 }
 
 type BattleEvent struct {
@@ -151,6 +175,7 @@ type BattleEvent struct {
 	Data       map[string]interface{} `json:"data,omitempty" bson:"data,omitempty"`
 	NodeID     *string                `json:"nodeId,omitempty" bson:"nodeId,omitempty"`
 	NodeStatus *NodeStatus            `json:"nodeStatus,omitempty" bson:"nodeStatus,omitempty"`
+	Prediction *AimPrediction         `json:"prediction,omitempty" bson:"prediction,omitempty"`
 }
 
 type BehaviorTree struct {
@@ -162,17 +187,26 @@ type BehaviorTree struct {
 }
 
 type BattleState struct {
-	BattleID        string         `json:"battleId" bson:"battleId"`
-	Frame           int            `json:"frame" bson:"frame"`
-	IsRunning       bool           `json:"isRunning" bson:"isRunning"`
-	IsPaused        bool           `json:"isPaused" bson:"isPaused"`
-	IsFinished      bool           `json:"isFinished" bson:"isFinished"`
-	Winner          *FighterSide  `json:"winner,omitempty" bson:"winner,omitempty"`
-	AI1             FighterState `json:"ai1" bson:"ai1"`
-	AI2             FighterState `json:"ai2" bson:"ai2"`
-	AI1CurrentNodeID *string     `json:"ai1CurrentNodeId,omitempty" bson:"ai1CurrentNodeId,omitempty"`
-	AI2CurrentNodeID *string     `json:"ai2CurrentNodeId,omitempty" bson:"ai2CurrentNodeId,omitempty"`
-	Events          []BattleEvent `json:"events" bson:"events"`
+	BattleID         string                    `json:"battleId" bson:"battleId"`
+	Frame            int                       `json:"frame" bson:"frame"`
+	IsRunning        bool                      `json:"isRunning" bson:"isRunning"`
+	IsPaused         bool                      `json:"isPaused" bson:"isPaused"`
+	IsFinished       bool                      `json:"isFinished" bson:"isFinished"`
+	Winner           *FighterSide              `json:"winner,omitempty" bson:"winner,omitempty"`
+	AI1              FighterState              `json:"ai1" bson:"ai1"`
+	AI2              FighterState              `json:"ai2" bson:"ai2"`
+	AI1CurrentNodeID *string                   `json:"ai1CurrentNodeId,omitempty" bson:"ai1CurrentNodeId,omitempty"`
+	AI2CurrentNodeID *string                   `json:"ai2CurrentNodeId,omitempty" bson:"ai2CurrentNodeId,omitempty"`
+	Events           []BattleEvent             `json:"events" bson:"events"`
+	ExecutionStack   []ExecutionStackFrame     `json:"executionStack,omitempty" bson:"executionStack,omitempty"`
+	StepMode         bool                      `json:"stepMode" bson:"stepMode"`
+	CurrentStep      int                       `json:"currentStep" bson:"currentStep"`
+	AimPredictions   map[string]AimPrediction  `json:"aimPredictions,omitempty" bson:"aimPredictions,omitempty"`
+}
+
+type WSCommand struct {
+	Type string                 `json:"type" bson:"type"`
+	Data map[string]interface{} `json:"data" bson:"data"`
 }
 
 type BattleRequest struct {

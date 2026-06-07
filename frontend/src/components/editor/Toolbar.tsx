@@ -9,6 +9,10 @@ import {
   Swords,
   FileText,
   AlertTriangle,
+  Undo2,
+  Redo2,
+  Copy,
+  Clipboard,
 } from 'lucide-react'
 import { useEditorStore } from '../../store/editorStore'
 import { saveBehaviorTree, getBehaviorTrees } from '../../utils/api'
@@ -17,9 +21,29 @@ import { BehaviorTree } from '../../types'
 
 interface ToolbarProps {
   onStartBattle: () => void
+  onUndo: () => void
+  onRedo: () => void
+  onCopy: () => void
+  onPaste: () => void
+  canUndo: boolean
+  canRedo: boolean
+  hasCopiedNode: boolean
+  historyIndex: number
+  historyCount: number
 }
 
-export const Toolbar: React.FC<ToolbarProps> = ({ onStartBattle }) => {
+export const Toolbar: React.FC<ToolbarProps> = ({
+  onStartBattle,
+  onUndo,
+  onRedo,
+  onCopy,
+  onPaste,
+  canUndo,
+  canRedo,
+  hasCopiedNode,
+  historyIndex,
+  historyCount,
+}) => {
   const { treeName, setTreeName, clearAll, importFromJSON, exportToJSON, loadTemplate, nodes, edges, rootNodeId } =
     useEditorStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -155,6 +179,57 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onStartBattle }) => {
           <option value="aggressive">激进AI</option>
           <option value="defensive">防御AI</option>
         </select>
+      </div>
+
+      <div className="h-8 w-px bg-gradient-to-b from-transparent via-cyan-500/50 to-transparent" />
+
+      <div className="flex items-center gap-2 z-10">
+        <button
+          onClick={onUndo}
+          disabled={!canUndo}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/50 border border-gray-600/50 rounded-lg text-gray-400 text-sm hover:bg-cyan-900/30 hover:border-cyan-500/50 hover:text-cyan-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gray-800/50 disabled:hover:border-gray-600/50 disabled:hover:text-gray-400"
+          title="撤销 (Ctrl+Z)"
+        >
+          <Undo2 className="w-4 h-4" />
+          撤销
+        </button>
+
+        <button
+          onClick={onRedo}
+          disabled={!canRedo}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/50 border border-gray-600/50 rounded-lg text-gray-400 text-sm hover:bg-cyan-900/30 hover:border-cyan-500/50 hover:text-cyan-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gray-800/50 disabled:hover:border-gray-600/50 disabled:hover:text-gray-400"
+          title="重做 (Ctrl+Y)"
+        >
+          <Redo2 className="w-4 h-4" />
+          重做
+        </button>
+
+        <div className="flex items-center px-2 py-1 bg-gray-800/50 border border-gray-700/50 rounded-lg text-gray-400 text-xs font-mono">
+          {historyCount > 0 ? `${historyIndex + 1}/${historyCount}` : '0/50'}
+        </div>
+      </div>
+
+      <div className="h-8 w-px bg-gradient-to-b from-transparent via-cyan-500/50 to-transparent" />
+
+      <div className="flex items-center gap-2 z-10">
+        <button
+          onClick={onCopy}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/50 border border-gray-600/50 rounded-lg text-gray-400 text-sm hover:bg-blue-900/30 hover:border-blue-500/50 hover:text-blue-400 transition-all"
+          title="复制 (Ctrl+C)"
+        >
+          <Copy className="w-4 h-4" />
+          复制
+        </button>
+
+        <button
+          onClick={onPaste}
+          disabled={!hasCopiedNode}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/50 border border-gray-600/50 rounded-lg text-gray-400 text-sm hover:bg-blue-900/30 hover:border-blue-500/50 hover:text-blue-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gray-800/50 disabled:hover:border-gray-600/50 disabled:hover:text-gray-400"
+          title="粘贴 (Ctrl+V)"
+        >
+          <Clipboard className="w-4 h-4" />
+          粘贴
+        </button>
       </div>
 
       <div className="h-8 w-px bg-gradient-to-b from-transparent via-cyan-500/50 to-transparent" />
